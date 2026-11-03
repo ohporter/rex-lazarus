@@ -43,3 +43,6 @@ file as Rex does: `$REX_CONFIG`, else `$XDG_CONFIG_HOME/rex/init.lua`, else
 
 Requirements: Python 3.10 or later (standard library only), Rex with API revision 9 or later.
 
+## License
+
+MIT. See `LICENSE`.
