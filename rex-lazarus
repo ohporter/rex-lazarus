@@ -12,6 +12,11 @@ fills that gap for two programs:
            "cd <dir> && nvim <files>" followed by Enter into each recorded pane.
            rex_lazarus.lua, which init.lua loads, runs it with --background.
 
+Other programs are recorded only if their name is in the replay allowlist. Restore types
+their command line again in their directory. The allowlist is in
+$XDG_CONFIG_HOME/rex-lazarus/replay, else ~/.config/rex-lazarus/replay, one program name
+per line. If that file does not exist, a built-in list is used.
+
 State is in $REX_LAZARUS_STATE_DIR, else $XDG_STATE_HOME/rex-lazarus, else
 ~/.local/state/rex-lazarus.
 """
@@ -35,6 +40,12 @@ CLAUDE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 READY_TIMEOUT = 60.0
 SHELL_IDLE_TIMEOUT = 30.0
 SHELL_IDLE_STABLE = 1.5
+# Programs that are safe to start again from their command line. Do not add programs that
+# change things when they run (build tools, package managers, scripts).
+DEFAULT_REPLAY = (
+    "htop", "btop", "top", "watch", "tail", "journalctl", "less", "man",
+    "ssh", "lazygit", "tig", "k9s",
+)
 
 
 class RexError(Exception):
@@ -50,6 +61,21 @@ def state_dir() -> Path:
         return Path(explicit)
     base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
     return Path(base) / "rex-lazarus"
+
+
+def config_dir() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "rex-lazarus"
+
+
+def replay_allowlist() -> set[str]:
+    """Program names whose command line restore may type again."""
+    try:
+        text = (config_dir() / "replay").read_text()
+    except FileNotFoundError:
+        return set(DEFAULT_REPLAY)
+    lines = (line.split("#", 1)[0].strip() for line in text.splitlines())
+    return {line for line in lines if line}
 
 
 def default_endpoint() -> str:
@@ -206,6 +232,14 @@ def nvim_record(process: dict) -> dict:
     return {"program": "nvim", "cwd": process["cwd"], "args": cmdline(process["pid"])[1:]}
 
 
+def argv_record(process: dict, allowlist: set[str]) -> dict | None:
+    """Record the command line of an allowlisted program, to type again at restore."""
+    argv = cmdline(process["pid"])
+    if not argv or Path(argv[0]).name not in allowlist:
+        return None
+    return {"program": "argv", "cwd": process["cwd"], "argv": argv}
+
+
 def api_too_old(status: dict, command: str) -> bool:
     revision = status.get("api_revision", 0)
     if revision >= MIN_API_REVISION:
@@ -231,6 +265,7 @@ def save(rex: Rex) -> int:
         log(f"save: server instance {status['instance_id']} not restored yet, skipping")
         return 0
     panes = {}
+    allowlist = replay_allowlist()
     for block_id in block_ids:
         try:
             info = rex.block(block_id, "process")
@@ -248,7 +283,7 @@ def save(rex: Rex) -> int:
             case "nvim":
                 record = nvim_record(foreground)
             case _:
-                record = None
+                record = argv_record(foreground, allowlist)
         if record:
             panes[block_id] = record
     state["servers"][rex.endpoint] = {
@@ -269,7 +304,15 @@ def resume_command(record: dict) -> str | None:
             return f"{cd} && nvim -- {shlex.join(files)}" if files else f"{cd} && nvim"
         case {"program": "nvim", "args": args}:
             return f"{cd} && nvim {shlex.join(args)}".rstrip()
+        case {"program": "argv", "argv": [_, *_] as argv}:
+            return f"{cd} && {shlex.join(argv)}"
     return None
+
+
+def label(record: dict) -> str:
+    if record["program"] == "argv":
+        return Path(record["argv"][0]).name
+    return record["program"]
 
 
 def wait_for_server(rex: Rex) -> dict | None:
@@ -342,7 +385,7 @@ def restore(rex: Rex, force: bool) -> int:
         except (RexError, json.JSONDecodeError) as error:
             skipped.append(f"{short} ({error})")
             continue
-        resumed.append(f"{short} {record['program']}")
+        resumed.append(f"{short} {label(record)}")
     # The record stays as it was until the next save, so a failed restore can be retried
     # with --force.
     server["instance_id"] = status["instance_id"]
@@ -373,7 +416,7 @@ def main() -> int:
         help="Rex server endpoint (default: %(default)s)",
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("save", help="record the Claude Code and Neovim panes")
+    commands.add_parser("save", help="record the Claude Code, Neovim and allowlisted panes")
     restoring = commands.add_parser("restore", help="resume the recorded panes")
     restoring.add_argument(
         "--background", action="store_true",
