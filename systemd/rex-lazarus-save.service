@@ -1,0 +1,6 @@
+[Unit]
+Description=Record the Claude Code and Neovim panes of the Rex server
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/rex-lazarus save
